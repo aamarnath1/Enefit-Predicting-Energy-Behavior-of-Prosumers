@@ -1,0 +1,856 @@
+---
+title: "DSCI-445 Final Project" 
+author: "Ronnie, Lucas, Arya" 
+format: 
+  revealjs:
+    theme: serif
+    slideNumber: true
+    
+editor: visual
+css: custom.css
+---
+
+```{r cache=T}
+set.seed(445) 
+library(tidyverse) 
+library(tidymodels) 
+library(readr) 
+library(dplyr) 
+library(ggplot2) 
+library(glmnet) 
+library(xgboost) 
+library(neuralnet) 
+library(lubridate) 
+library(winch) 
+library(parsnip) 
+library(knitr) 
+library(data.table) 
+library(caret) 
+library(kernlab)
+library(rpart.plot)
+library(rpart)
+library(recipes)
+library(mgcv)
+```
+
+```{r cache=T}
+#Loading data 
+setwd("D:/Projects/445 Final Proj/Final-project-presentation/Final-project-presentation/predict energy behavior of prosumers")
+#setwd("~/CSU/Fall 23/DSCI 445/Final Project/project-5/predict energy behavior of prosumers")
+train <- read_csv("train.csv") 
+client <- read_csv("client.csv") 
+electricity_prices <- read_csv("electricity_prices.csv") 
+gas_prices <- read_csv("gas_prices.csv") 
+forecast_weather <- read_csv("forecast_weather.csv") 
+historical_weather <- read_csv("historical_weather.csv") 
+weather_to_county <- read_csv("weather_station_to_county_mapping.csv")
+```
+
+```{r cache=T}
+# Merging data
+train <- train %>% 
+  mutate("datetime_hour" = format(train$datetime, "%H:%M:%S"))
+
+t_client <- left_join(train, client, by=c("county", "product_type", "is_business", "data_block_id"))
+
+electricity_prices <- electricity_prices %>% 
+  mutate("forecast_hour" = format(electricity_prices$forecast_date, "%H:%M:%S"))
+
+t_c_electricity <- left_join(t_client, electricity_prices, by=c("data_block_id", "datetime_hour" = "forecast_hour"))
+
+whole_data <- left_join(t_c_electricity, gas_prices, by="data_block_id")
+```
+
+```{r cache=T}
+# Merging weather data
+
+# need this else get errors with floating point comparison with ==
+forecast_weather$latitude <- round(forecast_weather$latitude, digits = 1)
+forecast_weather$longitude <- round(forecast_weather$longitude, digits = 1)
+
+weather_to_county$latitude <- round(weather_to_county$latitude, digits = 1)
+weather_to_county$longitude <- round(weather_to_county$longitude, digits = 1)
+
+forecast_with_county <- left_join(forecast_weather, weather_to_county, by=c("longitude", "latitude"))
+
+weather_forecast_from_day_before <- forecast_with_county %>% filter(hours_ahead >= 24)
+
+# data.table more efficient for large datasets
+weather_forecast_from_day_before_dt <- as.data.table(weather_forecast_from_day_before)
+
+weather_forecast_averaged_by_county_dt <- weather_forecast_from_day_before_dt[, .(temperature=mean(temperature),
+            dewpoint=mean(dewpoint),
+            cloudcover_high=mean(cloudcover_high),
+            cloudcover_mid=mean(cloudcover_mid),
+            cloudcover_low=mean(cloudcover_low),
+            cloudcover_total=mean(cloudcover_total),
+            `10_metre_u_wind_component`=mean(`10_metre_u_wind_component`),
+            `10_metre_v_wind_component`=mean(`10_metre_v_wind_component`),
+            direct_solar_radiation=mean(direct_solar_radiation),
+            surface_solar_radiation_downwards=mean(surface_solar_radiation_downwards),
+            snowfall=mean(snowfall),
+            total_precipitation=mean(total_precipitation)), by=.(county, forecast_datetime)]
+
+weather_forecast_averaged_by_county <- as.data.frame(weather_forecast_averaged_by_county_dt)
+
+whole_data_with_weather <- left_join(whole_data, weather_forecast_averaged_by_county, by=c("county", "datetime" = "forecast_datetime"))
+```
+
+```{r cache=T}
+# Clean data
+whole_data <- whole_data %>% 
+  mutate(cons_or_prod=ifelse(is_consumption == 0, "production", "consumption"),
+         pred_unit_id=as.factor(prediction_unit_id),
+         county=as.factor(county),
+         is_business=as.factor(is_business),
+         product_type=as.factor(product_type),
+         month=format(whole_data$datetime,"%m"), 
+         day=data_block_id,
+         hour=datetime_hour,
+         nat_gas_price_dif=highest_price_per_mwh-lowest_price_per_mwh,
+         nat_gas_price_high=highest_price_per_mwh,
+         nat_gas_price_low=lowest_price_per_mwh,
+         elect_price=euros_per_mwh,
+         pv_capacity=installed_capacity,
+         consum_pts=eic_count)
+
+clean_data <- whole_data %>% select(cons_or_prod, county, is_business, product_type, month, day, hour, consum_pts, pv_capacity, elect_price, nat_gas_price_high, nat_gas_price_low, target)
+
+target_NAs <- which(is.na(clean_data$target))
+clean_data <- clean_data[-target_NAs,]
+```
+
+```{r cache=T}
+# Clean data with weather
+whole_data_with_weather <- whole_data_with_weather %>% 
+  mutate(cons_or_prod=ifelse(is_consumption == 0, "production", "consumption"),
+         pred_unit_id=as.factor(prediction_unit_id),
+         county=as.factor(county),
+         is_business=as.factor(is_business),
+         product_type=as.factor(product_type),
+         month=format(whole_data$datetime,"%m"), 
+         day=data_block_id,
+         hour=datetime_hour,
+         nat_gas_price_dif=highest_price_per_mwh-lowest_price_per_mwh,
+         nat_gas_price_high=highest_price_per_mwh,
+         nat_gas_price_low=lowest_price_per_mwh,
+         elect_price=euros_per_mwh,
+         pv_capacity=installed_capacity,
+         consum_pts=eic_count)
+
+clean_data_weather <- whole_data_with_weather %>% select(cons_or_prod, county, is_business, product_type, month, day, hour, consum_pts, pv_capacity, elect_price, nat_gas_price_high, nat_gas_price_low, temperature, dewpoint, cloudcover_high, cloudcover_mid, cloudcover_low, cloudcover_total, `10_metre_u_wind_component`, `10_metre_v_wind_component`, direct_solar_radiation, surface_solar_radiation_downwards, snowfall, total_precipitation, target)
+
+target_NAs <- which(is.na(clean_data_weather$target))
+clean_data_weather <- clean_data_weather[-target_NAs,]
+clean_data_weather_no_NA <- na.omit(clean_data_weather)
+```
+
+## **Kaggle: "Enefit - Predict Energy Behavior of Prosumers"**
+
+-   Enefit, a Baltic (Estonian) energy company focused on: solving the issue of energy imbalance, when expected energy usage doesn't match up with actual energy use or production, which is largely skewed by 'Prosumers'
+
+   
+
+-   Prosumers: People who both consume and generate energy (through renewable sources)
+
+   
+
+-   Our goal is to develop a predictive model that can accurately forecast the energy behavior and patterns of Estonian prosumers utilizing data science/ techniques learnt from this semester.
+
+::: columns
+::: {.column width="30%"}
+<img src="eesti-energia-logo.png"/>
+:::
+
+::: {.column width="70%"}
+<img src="Enerfit-kaggle-image.png"/>
+:::
+:::
+
+## Motivation
+
+-   Energy imbalance when the energy expected to be used doesn't line up with the actual energy used or produced
+-   Unpredictable energy use causes logistical and financial problems for energy managers / providers
+
+<img src="enefit-solar-roof.png"/>
+
+## Data
+
+-   Time series of 637 days of energy production and consumption for 69 unique client categories
+
+    -   Categories defined by **business** **type**, **product** **type**, and **location**
+
+-   Electricity and natural gas prices on the day-ahead markets
+
+    -   Natural gas price daily
+
+    -   Electricity price hourly
+
+-   Historical and forecasted weather
+
+    -   Mapped by **latitude** and **longitude**
+
+-   **Datetime** / **Date**: Was split into hourly and daily.
+
+    -   Day Before (D-1) : Train (hourly), Client (daily), Electricity, Gas
+
+    -   Actual (D) : Forecasted + Historical Weather, Train, Client, Electricity, Gas
+
+    -   Predicted (D+1) : Forecasted Weather (hourly)
+
+-   **is_consumption**: Binary for Consumption (1) and Production (0)
+
+-   **data_block_id**: Unique identifier to link data across multiple data sets (represented per day)
+
+## Data Overview {.tabset}
+
+::: panel-tabset
+### Train
+
+```{r cache = T}
+knitr::kable(head(train))
+```
+
+### Client
+
+```{r cache = T}
+knitr::kable(head(client))
+```
+
+### Electricity Prices
+
+```{r cache = T}
+knitr::kable(head(electricity_prices))
+```
+
+### Gas Prices
+
+```{r cache = T}
+knitr::kable(head(gas_prices))
+```
+
+### Forecasted Weather
+
+```{r cache = T}
+knitr::kable(head(forecast_weather))
+```
+
+### Historical Weather
+
+```{r cache = T}
+knitr::kable(head(historical_weather))
+```
+
+### Weather to County
+
+```{r cache = T}
+knitr::kable(head(weather_to_county))
+```
+:::
+
+## Data manipulation
+
+``` r
+#Loading data 
+train <- read_csv("train.csv") 
+client <- read_csv("client.csv") 
+electricity_prices <- read_csv("electricity_prices.csv") 
+gas_prices <- read_csv("gas_prices.csv") 
+forecast_weather <- read_csv("forecast_weather.csv") 
+historical_weather <- read_csv("historical_weather.csv") 
+weather_to_county <- read_csv("weather_station_to_county_mapping.csv")
+
+# Merging data
+train <- train %>% 
+  mutate("datetime_hour" = format(train$datetime, "%H:%M:%S"))
+
+t_client <- left_join(train, client, by=c("county", "product_type", "is_business", "data_block_id"))
+
+electricity_prices <- electricity_prices %>% 
+  mutate("forecast_hour" = format(electricity_prices$forecast_date, "%H:%M:%S"))
+
+t_c_electricity <- left_join(t_client, electricity_prices, by=c("data_block_id", "datetime_hour" = "forecast_hour"))
+
+whole_data <- left_join(t_c_electricity, gas_prices, by="data_block_id")
+
+# Merging weather data
+forecast_weather$latitude <- round(forecast_weather$latitude, digits = 1)
+forecast_weather$longitude <- round(forecast_weather$longitude, digits = 1)
+
+weather_to_county$latitude <- round(weather_to_county$latitude, digits = 1)
+weather_to_county$longitude <- round(weather_to_county$longitude, digits = 1)
+# need this else get errors with floating point comparison with ==
+
+forecast_with_county <- left_join(forecast_weather, weather_to_county, by=c("longitude", "latitude"))
+
+weather_forecast_from_day_before <- forecast_with_county %>% filter(hours_ahead >= 24)
+
+# data.table more efficient for large datasets
+weather_forecast_from_day_before_dt <- as.data.table(weather_forecast_from_day_before)
+
+weather_forecast_averaged_by_county_dt <- weather_forecast_from_day_before_dt[, .(temperature=mean(temperature),
+            dewpoint=mean(dewpoint),
+            cloudcover_high=mean(cloudcover_high),
+            cloudcover_mid=mean(cloudcover_mid),
+            cloudcover_low=mean(cloudcover_low),
+            cloudcover_total=mean(cloudcover_total),
+            `10_metre_u_wind_component`=mean(`10_metre_u_wind_component`),
+            `10_metre_v_wind_component`=mean(`10_metre_v_wind_component`),
+            direct_solar_radiation=mean(direct_solar_radiation),
+            surface_solar_radiation_downwards=mean(surface_solar_radiation_downwards),
+            snowfall=mean(snowfall),
+            total_precipitation=mean(total_precipitation)), by=.(county, forecast_datetime)]
+
+weather_forecast_averaged_by_county <- as.data.frame(weather_forecast_averaged_by_county_dt)
+
+whole_data_with_weather <- left_join(whole_data, weather_forecast_averaged_by_county, by=c("county", "datetime" = "forecast_datetime"))
+
+# Cleaning data with weather
+whole_data_with_weather <- whole_data_with_weather %>% 
+  mutate(cons_or_prod=ifelse(is_consumption == 0, "production", "consumption"),
+         pred_unit_id=as.factor(prediction_unit_id),
+         county=as.factor(county),
+         is_business=as.factor(is_business),
+         product_type=as.factor(product_type),
+         month=format(whole_data$datetime,"%m"), 
+         day=data_block_id,
+         hour=datetime_hour,
+         nat_gas_price_dif=highest_price_per_mwh-lowest_price_per_mwh,
+         nat_gas_price_high=highest_price_per_mwh,
+         nat_gas_price_low=lowest_price_per_mwh,
+         elect_price=euros_per_mwh,
+         pv_capacity=installed_capacity,
+         consum_pts=eic_count)
+
+clean_data_weather <- whole_data_with_weather %>% 
+  select(cons_or_prod, 
+         county, 
+         is_business, 
+         product_type, 
+         month, 
+         day, 
+         hour, 
+         consum_pts, 
+         pv_capacity, 
+         elect_price, 
+         nat_gas_price_high, 
+         nat_gas_price_low, 
+         temperature, 
+         dewpoint, 
+         cloudcover_high, 
+         cloudcover_mid, 
+         cloudcover_low, 
+         cloudcover_total, 
+         `10_metre_u_wind_component`, 
+         `10_metre_v_wind_component`, 
+         direct_solar_radiation, 
+         surface_solar_radiation_downwards, 
+         snowfall, 
+         total_precipitation, target)
+
+target_NAs <- which(is.na(clean_data_weather$target))
+clean_data_weather <- clean_data_weather[-target_NAs,]
+```
+
+## Energy by Time {.tabset}
+
+::: panel-tabset
+======= \### Day
+
+```{r cache=T}
+library(ggplot2)
+ggplot() + 
+  geom_col(aes(x=day, y=target, fill=cons_or_prod), data=clean_data) +
+  facet_wrap(~cons_or_prod) +
+  guides(fill="none") +
+  theme_bw()
+```
+
+### Month
+
+```{r cache=T}
+library(ggplot2)
+ggplot() + geom_col(aes(x=month, y=target, fill=cons_or_prod), data=clean_data) +
+  facet_wrap(~cons_or_prod) +
+  guides(fill="none") +
+  theme_bw()
+```
+
+### Hour
+
+```{r cache=T}
+ggplot() + geom_col(aes(x=day, y=target, fill=cons_or_prod), data=clean_data) +
+  facet_wrap(~cons_or_prod) +
+  guides(fill="none") +
+  theme_bw()
+```
+
+### Day
+
+```{r cache=T}
+ggplot() + geom_col(aes(x=hour, y=target, fill=cons_or_prod), data=clean_data) +
+  facet_wrap(~cons_or_prod) +
+  guides(fill="none") + theme_bw() +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1))
+```
+:::
+
+## Temperature by Energy
+
+```{r cache = T}
+library(ggplot2)
+ggplot(clean_data_weather, aes(x = temperature, y = target, color = temperature)) +
+  geom_point() + 
+  labs(title = "Forecasted Temperature vs Energy",
+       x = "Forecasted Temperature",
+       y = "Energy") +
+  theme_bw() +
+  scale_color_gradient(low = "blue", high = "red") +
+  facet_wrap(~ cons_or_prod) +
+  labs(fill = "Temperature in C")
+```
+
+## Distribution of Response Variable
+
+::: panel-tabset
+### Histogram
+
+```{r cache=T}
+ggplot() + 
+  geom_histogram(aes(target, fill=cons_or_prod), data=clean_data, bins=50) +
+  facet_wrap(~cons_or_prod) +
+  guides(fill="none") + 
+  theme_bw()
+```
+
+### Boxplot
+
+```{r cache=T}
+ggplot() + 
+  geom_boxplot(aes(x=cons_or_prod, y=target, col=cons_or_prod), data=clean_data) +
+  guides(col='none') +
+  theme_bw()
+```
+
+### Table
+
+```{r cache=T}
+cons_targets <- (clean_data %>% filter(cons_or_prod=="consumption"))$target
+prod_targets <- (clean_data %>% filter(cons_or_prod=="production"))$target
+cons_mean <- mean(cons_targets)
+cons_median <- median(cons_targets)
+prod_mean <- mean(prod_targets)
+prod_median <- median(prod_targets)
+
+summary_df <- data.frame(Metric = c("Mean", "Median"),
+                         Consumption = c(cons_mean, cons_median),
+                         Production = c(prod_mean, prod_median))
+
+kable(summary_df, col.names = c("", "Consumption", "Production"))
+```
+:::
+
+## Photovoltaic Capacity by Energy
+
+```{r cache = T}
+ggplot(clean_data, aes(pv_capacity, target, col=cons_or_prod))+
+  geom_point(alpha = 0.3) +
+  facet_wrap(~cons_or_prod) +
+  guides(col='none') +
+  labs(title = "Photovoltaic Capacity vs Energy",
+       x = "PV Capacity",
+       y = "Energy") +
+  theme_bw()
+```
+
+## Solar Radiation by Energy
+
+```{r cache = T}
+ggplot() + 
+  geom_point(aes(x=surface_solar_radiation_downwards, y=target, col=cons_or_prod),
+             alpha=0.3, data=clean_data_weather) +
+  labs(title = "Solar Radiation vs Energy",
+       x = "Solar Radiation",
+       y = "Energy") +
+  theme_bw()
+```
+
+## Getting into our Models
+
+```{r cache=T, fig.height=4}
+wtest_prop <- 0.2
+wtest_sample <- sample(seq(nrow(clean_data_weather_no_NA)),
+                      wtest_prop*nrow(clean_data_weather_no_NA))
+
+wtestset <- clean_data_weather_no_NA[wtest_sample,]
+wtrainset <- clean_data_weather_no_NA[-wtest_sample,]
+```
+
+``` r
+wtest_prop <- 0.2
+wtest_sample <- sample(seq(nrow(clean_data_weather_no_NA)),
+                      wtest_prop*nrow(clean_data_weather_no_NA))
+
+wtestset <- clean_data_weather_no_NA[wtest_sample,]
+wtrainset <- clean_data_weather_no_NA[-wtest_sample,]
+```
+
+1.  **Null Model**
+2.  **Linear Model**
+3.  **Linear Model w/ LASSO**
+4.  **General Additive Model w/ NS**
+5.  **Decision Tree w/ 5-fold CV**
+6.  **XGBoost w/ 5-fold CV**
+
+## Null Model
+
+```{r cache=T}
+wmod0_train_mae <- mean(abs(mean(wtrainset$target) - wtrainset$target))
+wmod0_test_mae <- mean(abs(mean(wtrainset$target) - wtestset$target))
+
+#paste("Train MAE:", round(wmod0_train_mae,2),
+#      "  Test MAE:", round(wmod0_test_mae,2))
+```
+
+-   Null MAE of predicting simply the mean of the response variable from the training set
+
+|       | RMSE  | MAE   |
+|-------|-------|-------|
+| Train | 917.7 | 372.5 |
+| Test  | 913.8 | 371.4 |
+
+The Mean Absolute Error (MAE) is calculated using the following formula:
+
+$$ \text{MAE} = \frac{1}{n} \sum_{i=1}^{n} |y_i - \hat{y}_i| $$
+
+Where:
+
+-   $n$: the number of observations.
+
+-   $y_i$: the actual value for the $i^{th}$ observation.
+
+-   $\hat{y}_i$: the predicted value for the $i^{th}$ observation.
+
+```{r cache=T}
+wmod1_lm <- lm(target~., data=wtrainset)
+
+wmod1_train_pred <- predict(wmod1_lm, newdata=wtrainset)
+wmod1_resid <- wmod1_train_pred - wtrainset$target
+wmod1_train_rmse <- sqrt(mean((wmod1_resid)^2))
+wmod1_train_mae <- mean(abs(wmod1_train_pred - wtrainset$target))
+
+wmod1_test_pred <- predict(wmod1_lm, newdata=wtestset)
+wmod1_test_rmse <- sqrt(mean((wmod1_test_pred - wtestset$target)^2))
+wmod1_test_mae <- mean(abs(wmod1_test_pred - wtestset$target))
+```
+
+## Linear Model
+
+::: panel-tabset
+### Plot
+
+Residuals vs Fitted
+
+```{r cache=T}
+library(ggplot2)
+ggplot() +
+  geom_point(aes(x=wmod1_train_pred, y=wmod1_resid)) +
+  geom_hline(yintercept = 0, linetype = "dashed", color = "red") +
+  theme_bw()
+```
+
+### Performance
+
+|       | RMSE  | MAE   |
+|-------|-------|-------|
+| Train | 656.6 | 293.4 |
+| Test  | 657.0 | 293.8 |
+:::
+
+## Linear Model + Lasso
+
+::: panel-tabset
+### Plot
+
+```{r cache=T}
+# Creating model matrix X and response vector y
+wtrain_matrix <- model.matrix(target~.-1, data=wtrainset)
+wtrain_target <- wtrainset$target
+wtest_matrix <- model.matrix(target~.-1, data=wtestset)
+
+wmod2_lasso <- cv.glmnet(wtrain_matrix, wtrain_target, alpha=1)
+plot(wmod2_lasso)
+
+wmod2_train_pred <- predict(wmod2_lasso, newx=wtrain_matrix,
+                            s="lambda.min")
+wmod2_test_pred <- predict(wmod2_lasso, newx=wtest_matrix, s="lambda.min")
+
+wmod2_train_rmse <- sqrt(mean((wmod2_train_pred - wtrainset$target)^2))
+wmod2_test_rmse <- sqrt( mean( (wmod2_test_pred - wtestset$target)^2 ) )
+
+wmod2_train_mae <- mean(abs(wmod2_train_pred-wtrainset$target))
+wmod2_test_mae <- mean(abs(wmod2_test_pred-wtestset$target))
+```
+
+### Performance
+
+-   The lasso procedure only eliminates two of the 74 predictors, an indicator for county12 and nat_gas_price_low
+
+|       | RMSE  | MAE   |
+|-------|-------|-------|
+| Train | 656.6 | 293.2 |
+| Test  | 657.0 | 293.6 |
+:::
+
+## GAM
+
+::: panel-tabset
+### Plot
+
+```{r cache = T}
+#install.packages("recipes")
+# 
+# gam_rec <- recipe(target ~ ., data = wtrainset) |>
+# step_ns(consum_pts, deg_free = 3) |>
+#  step_ns(pv_capacity, deg_free = 3) |>
+#  step_ns(elect_price, deg_free = 3) |>
+#  step_ns(nat_gas_price_high, deg_free = 3) |>
+#  step_ns(nat_gas_price_low, deg_free = 3) |>
+#  step_ns(temperature, deg_free = 3) |>
+#  step_ns(dewpoint, deg_free = 3) |>
+#  step_ns(cloudcover_high, deg_free = 3) |>
+#  step_ns(cloudcover_mid, deg_free = 3) |>
+#  step_ns(cloudcover_low, deg_free = 3) |>
+#  step_ns(cloudcover_total, deg_free = 3) |>
+#  step_ns('10_metre_u_wind_component', deg_free = 3) |>
+#  step_ns('10_metre_v_wind_component', deg_free = 3) |>
+#  step_ns(direct_solar_radiation, deg_free = 3) |>
+#  step_ns(surface_solar_radiation_downwards, deg_free = 3) |>
+#  step_ns(snowfall, deg_free = 3) |>
+#  step_ns(total_precipitation, deg_free = 3) |>
+#  step_dummy(all_nominal(), -all_outcomes())
+# 
+# # Define workflow
+# gam_wf <- workflow() %>%
+#  add_model(linear_reg()) %>%
+#  add_recipe(gam_rec)
+# 
+# gam_fit <- fit(gam_wf, data = wtrainset)
+# 
+# #Train RMSE
+# gam_train_pred <- predict(gam_fit, new_data = wtrainset)
+# gam_train_rmse <- sqrt(mean((gam_train_pred$.pred - wtrainset$target)^2)) #na.rm = TRUE))
+# 
+# # Train MAE
+# gam_train_mae <- mean(abs(gam_train_pred$.pred - wtrainset$target))#= TRUE)
+# 
+# # Predict on the test set using GAM model
+# gam_test_pred <- predict(gam_fit, new_data = wtestset)
+# 
+# # Add the predictions to the test set
+# wtestset <- wtestset %>%
+#   mutate(predicted_target = gam_test_pred$.pred)
+# 
+# # Plotting Actual vs Predicted Values
+# ggplot(wtestset, aes(x = target, y = predicted_target)) +
+#   geom_point(alpha = 0.5) +  # Scatter plot points
+#   geom_abline(intercept = 0, slope = 1, linetype = "dashed", color = "blue") +  # Line for perfect predictions
+#   labs(title = "Actual vs Predicted Values for GAM Model",
+#        x = "Actual Target Values",
+#        y = "Predicted Target Values") +
+#   theme_minimal()
+# 
+# # Calculating RMSE and MAE
+# calculated_rmse <- sqrt(mean((wtestset$predicted_target - wtestset$target)^2, na.rm = TRUE))
+# calculated_mae <- mean(abs(wtestset$predicted_target - wtestset$target), na.rm = TRUE)
+# 
+# paste("Calculated RMSE: ", calculated_rmse, "Calculated MAE: ", calculated_mae)
+
+```
+
+<img src="gam_plot.png"/>
+
+### Performance
+
+|       | RMSE   | MAE    |
+|-------|--------|--------|
+| Train | 656.22 | 656.64 |
+| Test  | 656.64 | 292.96 |
+:::
+
+## Energy Consumption and Production
+
+```{r cache = T}
+ggplot() +
+  geom_col(aes(x=county, y=target, col=cons_or_prod, 
+               fill=cons_or_prod), 
+           data=clean_data_weather) +
+  facet_grid(is_business~product_type) + 
+  theme(axis.text.x = element_text(size=4, angle=45, hjust=1)) +
+  theme_bw() +
+  guides(col = FALSE) +
+  labs(
+    title = "Energy Consumption and Production by County, Business Type, and Product",
+    x = "County",
+    y = "Target Energy Value",
+    fill = "Energy Type"
+  )
+```
+
+## Decision Tree
+
+::: panel-tabset
+### Plot
+
+<img src="CV_TreePlot.png"/>
+
+### Performance
+
+| Prediction | high   | low    |
+|------------|--------|--------|
+| high       | 558177 | 52188  |
+| low        | 44497  | 550489 |
+:::
+
+```{r cache = T }
+library(rpart.plot)
+library(rpart)
+#Data Prep for Trees
+
+r_whole_data <- na.omit(whole_data)%>%
+ mutate(is_consumption = as.factor(is_consumption)) %>%
+ mutate(is_business = as.factor(is_business)) %>%
+ mutate(county = as.factor(county)) %>%
+ mutate(product_type = as.factor(county))
+
+
+data_split<- initial_split(r_whole_data, prop = 0.4)
+
+df_train <- training(data_split)
+df_test <- testing(data_split)
+
+
+# Decision tree code
+tree_clas_spec <- decision_tree() |>
+ set_engine("rpart") |>
+ set_mode("classification")
+
+df_train|>
+ mutate(high_target = factor(if_else(target <= median(target), "low", "high")))|>
+ select(-forecast_date.x, -forecast_date.y, -row_id,
+        -origin_date.x, -origin_date.y, -datetime, -target) -> tree_clas_train
+df_test|>
+ mutate(high_target = factor(if_else(target <= median(target), "low", "high")))|>
+ select(-forecast_date.x, -forecast_date.y, -row_id,
+        -origin_date.x, -origin_date.y,-datetime,-target) -> tree_clas_test
+
+tree_clas_fit <- tree_clas_spec |>
+ fit(high_target ~., data = tree_clas_train)
+
+# tree_clas_fit |>
+#  extract_fit_engine() |>
+#  rpart.plot()
+
+# tree_clas_fit |>
+#  augment(new_data = tree_clas_test) |>
+#  accuracy(truth = high_target, estimate = .pred_class)
+# 
+# tree_clas_fit |>
+#  augment(new_data = tree_clas_test) |>
+#  conf_mat(truth = high_target, estimate = .pred_class)
+```
+
+```{r cache = T}
+
+train_cv_5fold_clas <- vfold_cv(tree_clas_train, v = 5)
+
+tune_df <- data.frame(alpha = 10^seq(-3, -1, length.out = 5))#length.out changed from 8 # 
+tree_tune_clas_spec <- decision_tree(cost_complexity = tune("alpha")) |>
+  set_engine("rpart") |>
+  set_mode("classification")
+
+tree_tune_clas_rec <- recipe(high_target ~ ., data = tree_clas_train)
+tree_clas_wf <- workflow() |>
+  add_model(tree_tune_clas_spec) |>
+  add_recipe(tree_tune_clas_rec)
+
+tune_clas_fit <- tree_clas_wf |>
+  tune_grid(resamples = train_cv_5fold_clas, grid = tune_df)
+# 
+# tune_clas_fit |>
+#   autoplot()
+
+tree_clas_final <- finalize_workflow(tree_clas_wf, select_best(tune_clas_fit, metric = "accuracy"))
+
+tree_clas_final |>
+  fit(data =tree_clas_train) -> tree_clas_final_fit
+
+tree_clas_final_fit |>
+  extract_fit_engine() |>
+  rpart.plot()
+
+# tree_clas_final_fit |>
+#   augment(new_data = tree_clas_test) |>
+#   accuracy(truth = high_target, estimate = .pred_class)
+# 
+# tree_clas_final_fit |>
+#   augment(new_data = tree_clas_test) |>
+#   conf_mat(truth = high_target, estimate = .pred_class)
+```
+
+## XGBoost
+
+::: panel-tabset
+### Plot
+
+<img src="xgboost_imp.png"/>
+
+### Performance
+
+|       | RMSE  | MAE  |
+|-------|-------|------|
+| Train | 118.8 | 51.6 |
+| Test  | 147.4 | 56.6 |
+:::
+
+## Model Evaluations
+
+|                         | RMSE  | MAE   |
+|-------------------------|-------|-------|
+| Null                    | 913.8 | 371.4 |
+| Linear                  | 657.0 | 293.8 |
+| Linear + Lasso          | 657.0 | 293.6 |
+| GAM with natural spline | 656.7 | 292.6 |
+| XGBoost                 | 147.4 | 56.6  |
+
+Best Model - XGBoost with Weather Data!
+
+## Future Improvements
+
+-   More Models
+
+    -   More focus within our classification models due to their improved performance
+
+    -   Neural Network
+
+-   Feature Engineer the Weather Data Better
+
+    -   Combinations of variables, Dimensionality Reduction or a more thorough feature selection process
+
+-   Optimizing and tuning our hyper parameters
+
+    -   More utilization of CV or other validation techniques to improve our model's parameters
+
+-   Computationally limited by our machines, experiment with cloud based servers
+
+## Thank you! Any Questions?
+
+## References
+
+-   "Predict Energy Behavior of Prosumers." Kaggle, https://www.kaggle.com/competitions/predict-energy-behavior-of-prosumers/overview. Accessed 7 Dec. 2023.
+
+-   "Reveal.js Presentations." Quarto, https://quarto.org/docs/presentations/revealjs/. Accessed 7 Dec. 2023.
+
+-   "Discussion on Predict Energy Behavior of Prosumers Competition." Kaggle, https://www.kaggle.com/competitions/predict-energy-behavior-of-prosumers/discussion/455833. Accessed 7 Dec. 2023.
+
+-   James, Gareth, et al. An Introduction to Statistical Learning: With Applications in R. 2nd ed., Springer, June 2023. https://hastie.su.domains/ISLR2/ISLRv2_corrected_June_2023.pdf.download.html. Accessed 7 Dec. 2023.
