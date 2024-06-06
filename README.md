@@ -6,8 +6,8 @@
 This repository contains all the code and datasets for our project on predicting the energy behavior of prosumers. The goal is to accurately forecast energy consumption and production patterns for Estonian prosumers using machine learning techniques.
 
 ## Project Structure
-- **[Final_Project_Presentation.qmd](Enefit-Predicting-Energy-Behavior-of-Prosumers/Final-project-presentation.qmd)**: Quarto Markdown file detailing our data preprocessing, exploratory data analysis, and modeling.
-- **[Final_Project_Presentation.html](Enefit-Predicting-Energy-Behavior-of-Prosumers/Final-project-presentation.html)**: HTML file of the final presentation.
+- **[Final_Project_Presentation.qmd](Final-project-presentation.qmd)**: Quarto Markdown file detailing our data preprocessing, exploratory data analysis, and modeling.
+- **[Final_Project_Presentation.html](Final-project-presentation.html)**: HTML file of the final presentation.
 - **Data**: Directory containing the datasets used in the project.
   - Within 'predict energy behavior of prosumers'
 - **Images**: Contains visualizations and figures used in the project.
