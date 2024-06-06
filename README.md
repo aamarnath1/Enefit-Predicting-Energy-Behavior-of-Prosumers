@@ -1,17 +1,15 @@
 # DSCI-445 Final Project: Predict Energy Behavior of Prosumers
 
-### Authors: Arya Amarnath, Ronnie, Lucas
+### Authors: Arya Amarnath, Ronnie Delgado, Lucas Pacheco
 
 ## Overview
-This repository contains all the code and datasets for our project on predicting energy behavior of prosumers. The goal is to accurately forecast energy consumption and production patterns for Estonian prosumers using machine learning techniques.
+This repository contains all the code and datasets for our project on predicting the energy behavior of prosumers. The goal is to accurately forecast energy consumption and production patterns for Estonian prosumers using machine learning techniques.
 
 ## Project Structure
 - **[Final_Project_Presentation.qmd](Final-project-presentation/Final-project-presentation.qmd)**: Quarto Markdown file detailing our data preprocessing, exploratory data analysis, and modeling.
 - **[Final_Project_Presentation.html](Final-project-presentation/Final-project-presentation.html)**: HTML file of the final presentation.
 - **Data**: Directory containing the datasets used in the project.
-- **Test_Notebooks**: Jupyter notebooks used during the process. Includes rough code and individual contributions.
-  - `Reading_Data`: Ronnie's data reading and cleaning notebook.
-  - `Test_Data_Pull`: Arya's initial data exploration and preprocessing.
+  - Within 'predict energy behavior of prosumers'
 - **Images**: Contains visualizations and figures used in the project.
   - `eesti-energia-logo.png`
   - `enefit-solar-roof.png`
@@ -23,12 +21,12 @@ This repository contains all the code and datasets for our project on predicting
 
 ## Research Methodology
 Our project involves:
-1. **Data Cleaning**: Processing and organizing the energy consumption and production data, as well as market prices and weather data.
+1. **Data Cleaning**: Processing and organizing the energy consumption, production data, market prices, and weather data.
 2. **Exploratory Data Analysis (EDA)**: Identifying key trends and patterns in the data using Pandas and visualization libraries such as Matplotlib and Seaborn.
-3. **Model Development**: Implementing machine learning models to predict energy behavior, including feature engineering and model validation.
+3. **Model Development**: Implementing linear, GAM, Decision Trees, and XGBoost to predict energy behavior, including feature engineering and model validation.
 
 ## Key Findings
-- The developed model accurately forecasts energy consumption and production patterns for Estonian prosumers.
+- Our XGBoost model accurately forecasts Estonian prosumers' energy consumption and production patterns with a RMSE of 147.4 and MSE of 56.6
 - Addressing energy imbalance helps in efficient energy management and planning.
 
 ## Future Work
